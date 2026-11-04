@@ -1,0 +1,62 @@
+name: ORT iOS (reduced)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ort:
+        description: ONNX Runtime tag
+        default: v1.31.1
+  push:
+    branches: [main]
+    paths: ['ops.config', 'build_settings_ios.json', '.github/workflows/ios.yml', 'patches/**']
+
+permissions:
+  contents: write
+
+jobs:
+  pods:
+    runs-on: macos-26
+    timeout-minutes: 300
+    env:
+      XCODE_APP: /Applications/Xcode_26.6.app
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+          python3 -m pip install --quiet --break-system-packages flatbuffers numpy || \
+            python3 -m pip install --quiet flatbuffers numpy
+          cmake --version | head -1
+          pod --version
+      - name: Build and assemble the pods
+        env:
+          ORT: ${{ github.event.inputs.ort || 'v1.31.1' }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$ORT" https://github.com/microsoft/onnxruntime.git ort
+          python3 patches/minimal_interop_release.py ort
+          python3 ort/tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
+            --build-dir "$PWD/work/build" \
+            --staging-dir "$PWD/work/pods" \
+            --pod-version "${ORT#v}-listen" \
+            --include-ops-by-config "$PWD/ops.config" \
+            --build-settings-file "$PWD/build_settings_ios.json" \
+            --build-apple-framework-arg=--config=Release
+          ls -la work/pods work/pods/*
+          du -sh work/pods/*
+          find work/pods -name '*.a' -o -name 'onnxruntime' -type f | xargs ls -la 2>/dev/null | head
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORT: ${{ github.event.inputs.ort || 'v1.31.1' }}
+        run: |
+          set -euo pipefail
+          NAME="onnxruntime-ios-${ORT#v}-listen-pods.tar.gz"
+          tar -C work/pods -czf "$NAME" .
+          shasum -a 256 "$NAME" | tee "$NAME.sha256"
+          ls -la "$NAME"
+          TAG="ios-${ORT#v}-$(git rev-parse --short HEAD)"
+          gh release create "$TAG" "$NAME" "$NAME.sha256" --title "$TAG" \
+            --notes "Reduced ONNX Runtime $ORT for iOS as local CocoaPods pods (onnxruntime-c, onnxruntime-objc; ops.config at $(git rev-parse --short HEAD))."

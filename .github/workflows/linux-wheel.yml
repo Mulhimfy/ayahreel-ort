@@ -1,0 +1,49 @@
+name: ORT Linux wheel (reduced, for checking)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ort:
+        description: ONNX Runtime tag
+        default: v1.31.1
+  push:
+    branches: [main]
+    paths: ['ops.config', '.github/workflows/linux-wheel.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build
+        env:
+          ORT: ${{ github.event.inputs.ort || 'v1.31.1' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y ninja-build >/dev/null
+          python -m pip install --quiet flatbuffers numpy wheel packaging setuptools
+          git clone --depth 1 --branch "$ORT" https://github.com/microsoft/onnxruntime.git ort
+          python ort/tools/ci_build/build.py --build_dir "$PWD/work" --config MinSizeRel \
+            --minimal_build --disable_ml_ops --enable_reduced_operator_type_support \
+            --include_ops_by_config "$PWD/ops.config" --build_wheel --skip_tests --parallel \
+            --cmake_generator Ninja --cmake_extra_defines onnxruntime_BUILD_UNIT_TESTS=OFF \
+            --compile_no_warning_as_error
+          ls -la work/MinSizeRel/dist/
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORT: ${{ github.event.inputs.ort || 'v1.31.1' }}
+        run: |
+          set -euo pipefail
+          W=$(ls work/MinSizeRel/dist/*.whl | head -1)
+          sha256sum "$W"
+          TAG="linux-wheel-${ORT#v}-$(git rev-parse --short HEAD)"
+          gh release create "$TAG" "$W" --title "$TAG" --prerelease \
+            --notes "Reduced ONNX Runtime $ORT, Linux x86_64 Python 3.12 wheel, for checking only."
